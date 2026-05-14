@@ -310,6 +310,24 @@ a{color:var(--blue);text-decoration:none}
 .fab.show{opacity:1;pointer-events:auto}
 .fab:hover{transform:scale(1.08)}
 
+.sync-status-pill{display:inline-flex;align-items:center;gap:5px;padding:6px 10px;
+ border-radius:14px;font-size:12px;background:var(--bg3);color:var(--muted);transition:all .2s}
+.sync-status-pill.active{color:var(--green)}
+.sync-status-pill.syncing{color:var(--blue)}
+.sync-status-pill.error{color:var(--red)}
+.sync-status-pill.offline{color:var(--muted)}
+.sync-step{display:flex;gap:10px;align-items:flex-start;padding:10px;border-radius:8px;
+ background:var(--bg3);border:1px solid var(--border);margin-bottom:8px}
+.sync-step .num{width:24px;height:24px;background:var(--accent);color:#000;border-radius:50%;
+ display:flex;align-items:center;justify-content:center;font-weight:700;font-size:13px;flex-shrink:0}
+.sync-step .body{flex:1;font-size:13px}
+.sync-step .body strong{display:block;margin-bottom:3px;color:var(--text)}
+.sync-step .body code{background:var(--bg);padding:1px 6px;border-radius:3px;font-size:12px;color:var(--accent)}
+.sync-info-box{padding:10px 12px;border-radius:8px;background:var(--keeper-bg);
+ border:1px solid var(--keeper);font-size:13px;margin-bottom:10px;color:var(--text)}
+.sync-info-box.warning{background:rgba(232,90,90,.08);border-color:var(--red);color:var(--text)}
+.sync-info-box.success{background:rgba(90,191,110,.08);border-color:var(--green);color:var(--text)}
+
 .toast{position:fixed;bottom:20px;left:50%;transform:translateX(-50%) translateY(100px);
  background:var(--bg3);padding:10px 18px;border-radius:20px;
  box-shadow:0 4px 12px rgba(0,0,0,.3);z-index:800;
@@ -358,6 +376,7 @@ a{color:var(--blue);text-decoration:none}
    <button class="btn" id="btn-stats" title="Stats">📊</button>
    <button class="btn" id="btn-add" title="Add album">+</button>
    <button class="btn btn-icon" id="btn-theme" title="Toggle theme">🌙</button>
+   <button class="btn btn-icon" id="btn-sync-status" title="Sync status" style="display:none">☁️</button>
    <button class="btn btn-icon" id="btn-menu" title="More">⋮</button>
   </div>
  </div>
@@ -455,6 +474,19 @@ a{color:var(--blue);text-decoration:none}
  </div>
 </div>
 
+<!-- Sync setup modal -->
+<div class="modal-backdrop" id="sync-modal">
+ <div class="modal" style="max-width:480px">
+  <div class="modal-header">
+   <div class="modal-title" id="sync-modal-title">☁️ Cross-device Sync</div>
+   <button class="btn-icon" onclick="closeSyncModal()">✕</button>
+  </div>
+  <div class="modal-body" id="sync-modal-body">
+   <!-- Content rendered dynamically -->
+  </div>
+ </div>
+</div>
+
 <!-- Menu modal -->
 <div class="modal-backdrop" id="menu-modal">
  <div class="modal" style="max-width:380px">
@@ -463,6 +495,7 @@ a{color:var(--blue);text-decoration:none}
    <button class="btn-icon" onclick="closeMenu()">✕</button>
   </div>
   <div class="modal-body">
+   <button class="btn" onclick="openSyncModal()" id="btn-sync-menu">☁️ Set up sync</button>
    <button class="btn" onclick="warmCovers()" id="btn-warm">🖼️ Pre-fetch all covers</button>
    <button class="btn" onclick="generateShareImage()">📸 Year in review (image)</button>
    <button class="btn" onclick="exportJSON()">💾 Export JSON backup</button>
@@ -472,7 +505,7 @@ a{color:var(--blue);text-decoration:none}
    <button class="btn" onclick="clearCoverCache()">🗑️ Clear cover cache</button>
    <button class="btn" onclick="resetData()" style="color:var(--red)">♻️ Reset to original data</button>
    <div style="font-size:12px;color:var(--muted);margin-top:10px;text-align:center">
-    Ostinato v6 · Data saved locally in browser
+    Ostinato v7 · Local + cloud sync
    </div>
   </div>
  </div>
@@ -603,10 +636,12 @@ function loadData(){
 function saveData(){
   try { localStorage.setItem(STORAGE_KEY, JSON.stringify(state.albums)); }
   catch(e){ toast('⚠️ Storage full — export backup'); }
+  if(typeof syncPushDebounced === 'function') syncPushDebounced();
 }
 function saveToListen(){
   try { localStorage.setItem(TOLISTEN_KEY, JSON.stringify(state.toListen)); }
   catch(e){ toast('⚠️ Storage full'); }
+  if(typeof syncPushDebounced === 'function') syncPushDebounced();
 }
 function loadCovers(){
   try { coverCache = JSON.parse(localStorage.getItem(COVER_KEY) || '{}'); }
@@ -1417,14 +1452,19 @@ function buildDiscoverList(){
     ? state.albums.filter(a => a.listen_year === state.currentYear)
     : state.albums.slice();
   if(scope === 'keepers') pool = pool.filter(a => a.keeper);
-  // Rediscover: least recently seen first (never-seen bubbles to top)
-  pool.sort((a,b) => {
-    const ta = a.lastSeenAt || 0;
-    const tb = b.lastSeenAt || 0;
-    if(ta === tb) return (a.artist||'').localeCompare(b.artist||'');
-    return ta - tb;
-  });
-  discoverState.list = pool;
+  // Two-tier sort:
+  //   1. Never-seen albums first, in RANDOM order (true rediscovery)
+  //   2. Then previously-seen albums, least-recently-seen first
+  const neverSeen = pool.filter(a => !a.lastSeenAt);
+  const seen = pool.filter(a => a.lastSeenAt);
+  // Shuffle never-seen (Fisher-Yates)
+  for(let i = neverSeen.length - 1; i > 0; i--){
+    const j = Math.floor(Math.random() * (i + 1));
+    [neverSeen[i], neverSeen[j]] = [neverSeen[j], neverSeen[i]];
+  }
+  // Sort seen ascending by lastSeenAt
+  seen.sort((a,b) => (a.lastSeenAt||0) - (b.lastSeenAt||0));
+  discoverState.list = [...neverSeen, ...seen];
   discoverState.index = 0;
 }
 function openDiscover(){
@@ -1998,6 +2038,436 @@ function debouncedAutoFill(){
   autofillTimer = setTimeout(tryAutoFillReleaseYear, 600);
 }
 
+
+/* =============================================================
+   GIST SYNC ENGINE
+============================================================= */
+const SYNC_TOKEN_KEY = 'ostinato-sync-token';
+const SYNC_GIST_ID_KEY = 'ostinato-sync-gist-id';
+const SYNC_LAST_PUSH_KEY = 'ostinato-sync-last-push';
+const SYNC_LAST_PULL_KEY = 'ostinato-sync-last-pull';
+const SYNC_FILENAME = 'ostinato-data.json';
+
+let syncState = {
+  enabled: false,
+  status: 'offline',  // 'offline' | 'syncing' | 'synced' | 'error'
+  lastError: null,
+  lastSyncAt: null,
+  pushTimer: null,
+  pullInterval: null,
+};
+
+function getSyncToken(){ return localStorage.getItem(SYNC_TOKEN_KEY) || ''; }
+function getSyncGistId(){ return localStorage.getItem(SYNC_GIST_ID_KEY) || ''; }
+function setSyncToken(t){
+  if(t) localStorage.setItem(SYNC_TOKEN_KEY, t);
+  else localStorage.removeItem(SYNC_TOKEN_KEY);
+}
+function setSyncGistId(id){
+  if(id) localStorage.setItem(SYNC_GIST_ID_KEY, id);
+  else localStorage.removeItem(SYNC_GIST_ID_KEY);
+}
+
+function syncStatusUpdate(status, error){
+  syncState.status = status;
+  syncState.lastError = error || null;
+  const btn = document.getElementById('btn-sync-status');
+  if(!btn) return;
+  if(!syncState.enabled){ btn.style.display = 'none'; return; }
+  btn.style.display = '';
+  const map = {
+    'syncing': { icon: '⏳', title: 'Syncing...' },
+    'synced': { icon: '☁️', title: `Synced ${syncState.lastSyncAt ? new Date(syncState.lastSyncAt).toLocaleTimeString() : ''}` },
+    'error': { icon: '⚠️', title: `Sync error: ${error||'unknown'}` },
+    'offline': { icon: '☁️', title: 'Sync configured (idle)' },
+  };
+  const m = map[status] || map['offline'];
+  btn.textContent = m.icon;
+  btn.title = m.title;
+}
+
+/* ============= GitHub API helpers ============= */
+async function ghApi(path, opts={}){
+  const token = getSyncToken();
+  if(!token) throw new Error('No token configured');
+  const url = `https://api.github.com${path}`;
+  const headers = Object.assign({
+    'Accept': 'application/vnd.github+json',
+    'Authorization': `Bearer ${token}`,
+    'X-GitHub-Api-Version': '2022-11-28',
+  }, opts.headers || {});
+  const r = await fetch(url, { ...opts, headers });
+  if(!r.ok){
+    let msg = `HTTP ${r.status}`;
+    try {
+      const body = await r.json();
+      if(body.message) msg = body.message;
+    } catch(e){}
+    throw new Error(msg);
+  }
+  return r.json();
+}
+
+/* ============= Validate token + Gist setup ============= */
+async function validateToken(token){
+  // Check that token is valid by hitting /user (very basic GH API call)
+  const r = await fetch('https://api.github.com/user', {
+    headers: {
+      'Accept': 'application/vnd.github+json',
+      'Authorization': `Bearer ${token}`,
+    }
+  });
+  if(!r.ok){
+    let msg = `HTTP ${r.status}`;
+    try { const body = await r.json(); if(body.message) msg = body.message; } catch(e){}
+    throw new Error(msg);
+  }
+  const user = await r.json();
+  return user.login;
+}
+
+async function createGist(){
+  const payload = buildSyncPayload();
+  const body = {
+    description: 'Ostinato music tracker — sync data',
+    public: false,
+    files: {
+      [SYNC_FILENAME]: { content: JSON.stringify(payload, null, 2) }
+    }
+  };
+  const result = await ghApi('/gists', {
+    method: 'POST',
+    body: JSON.stringify(body),
+  });
+  return result.id;
+}
+
+async function pullFromGist(){
+  const gistId = getSyncGistId();
+  if(!gistId) throw new Error('No Gist ID');
+  const gist = await ghApi(`/gists/${gistId}`);
+  const file = gist.files && gist.files[SYNC_FILENAME];
+  if(!file) throw new Error(`File ${SYNC_FILENAME} not found in Gist`);
+  let content = file.content;
+  // Handle truncated content (large files)
+  if(file.truncated && file.raw_url){
+    const r = await fetch(file.raw_url, {
+      headers: { 'Authorization': `Bearer ${getSyncToken()}` }
+    });
+    if(!r.ok) throw new Error(`Failed to fetch raw content`);
+    content = await r.text();
+  }
+  return JSON.parse(content);
+}
+
+async function pushToGist(){
+  const gistId = getSyncGistId();
+  if(!gistId) throw new Error('No Gist ID');
+  const payload = buildSyncPayload();
+  await ghApi(`/gists/${gistId}`, {
+    method: 'PATCH',
+    body: JSON.stringify({
+      files: {
+        [SYNC_FILENAME]: { content: JSON.stringify(payload, null, 2) }
+      }
+    })
+  });
+}
+
+/* ============= Build / apply sync payload ============= */
+function buildSyncPayload(){
+  return {
+    version: 1,
+    updatedAt: Date.now(),
+    albums: state.albums,
+    toListen: state.toListen,
+  };
+}
+
+function applySyncPayload(payload){
+  if(!payload || !payload.albums) throw new Error('Invalid sync payload');
+  state.albums = payload.albums;
+  state.toListen = payload.toListen || [];
+  // Save locally too
+  try { localStorage.setItem(STORAGE_KEY, JSON.stringify(state.albums)); } catch(e){}
+  try { localStorage.setItem(TOLISTEN_KEY, JSON.stringify(state.toListen)); } catch(e){}
+}
+
+/* ============= Sync orchestration ============= */
+async function syncPushDebounced(){
+  if(!syncState.enabled) return;
+  clearTimeout(syncState.pushTimer);
+  syncState.pushTimer = setTimeout(async () => {
+    syncState.pushTimer = null;
+    try {
+      syncStatusUpdate('syncing');
+      await pushToGist();
+      localStorage.setItem(SYNC_LAST_PUSH_KEY, String(Date.now()));
+      syncState.lastSyncAt = Date.now();
+      syncStatusUpdate('synced');
+    } catch(e){
+      console.error('Sync push failed:', e);
+      syncStatusUpdate('error', e.message);
+    }
+  }, 3000);
+}
+
+async function syncPullOnce(){
+  if(!syncState.enabled) return;
+  try {
+    syncStatusUpdate('syncing');
+    const remote = await pullFromGist();
+    const localUpdatedAt = parseInt(localStorage.getItem(SYNC_LAST_PUSH_KEY) || '0');
+    if(remote.updatedAt && remote.updatedAt > localUpdatedAt){
+      // Cloud is newer — apply
+      applySyncPayload(remote);
+      localStorage.setItem(SYNC_LAST_PULL_KEY, String(Date.now()));
+      // Don't immediately push — we just pulled
+      localStorage.setItem(SYNC_LAST_PUSH_KEY, String(remote.updatedAt));
+      render();
+      toast('🔄 Updated from cloud');
+    }
+    syncState.lastSyncAt = Date.now();
+    syncStatusUpdate('synced');
+  } catch(e){
+    console.error('Sync pull failed:', e);
+    syncStatusUpdate('error', e.message);
+  }
+}
+
+function startSync(){
+  syncState.enabled = !!(getSyncToken() && getSyncGistId());
+  if(!syncState.enabled) return;
+  syncStatusUpdate('synced');
+  // Pull on start
+  syncPullOnce();
+  // Periodic pull every 60 seconds (cheap — just a small JSON fetch)
+  if(syncState.pullInterval) clearInterval(syncState.pullInterval);
+  syncState.pullInterval = setInterval(syncPullOnce, 60000);
+  // Pull when tab regains focus
+  document.addEventListener('visibilitychange', () => {
+    if(!document.hidden && syncState.enabled) syncPullOnce();
+  });
+}
+
+function disableSync(){
+  syncState.enabled = false;
+  clearTimeout(syncState.pushTimer);
+  clearInterval(syncState.pullInterval);
+  setSyncToken('');
+  setSyncGistId('');
+  localStorage.removeItem(SYNC_LAST_PUSH_KEY);
+  localStorage.removeItem(SYNC_LAST_PULL_KEY);
+  syncStatusUpdate('offline');
+  document.getElementById('btn-sync-status').style.display = 'none';
+}
+
+/* ============= Sync modal UI ============= */
+function openSyncModal(){
+  closeMenu();
+  renderSyncModal();
+  document.getElementById('sync-modal').classList.add('show');
+}
+function closeSyncModal(){
+  document.getElementById('sync-modal').classList.remove('show');
+}
+
+function renderSyncModal(){
+  const body = document.getElementById('sync-modal-body');
+  const token = getSyncToken();
+  const gistId = getSyncGistId();
+
+  if(!token){
+    // Step 1: Token entry
+    body.innerHTML = `
+      <div class="sync-info-box">
+        <strong>What is sync?</strong><br>
+        Your music data will be stored in a private GitHub Gist that only you can access. 
+        Open Ostinato on any device → same data everywhere.
+      </div>
+      <div class="sync-step">
+        <span class="num">1</span>
+        <div class="body">
+          <strong>Have your Personal Access Token ready</strong>
+          The token starts with <code>github_pat_</code>. If you don't have one, visit
+          <a href="https://github.com/settings/tokens?type=beta" target="_blank">github.com/settings/tokens</a>
+          and create one with <strong>Gists: Read &amp; write</strong> permission.
+        </div>
+      </div>
+      <div class="sync-step">
+        <span class="num">2</span>
+        <div class="body">
+          <strong>Paste your token below</strong>
+          <input type="password" id="sync-token-input" placeholder="github_pat_..." 
+            style="margin-top:6px;width:100%;padding:8px 10px;background:var(--bg);border:1px solid var(--border);border-radius:6px;color:var(--text);font-family:monospace;font-size:12px">
+        </div>
+      </div>
+      <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:8px">
+        <button class="btn" onclick="closeSyncModal()">Cancel</button>
+        <button class="btn btn-primary" onclick="syncSetupStep1()">Continue</button>
+      </div>`;
+    return;
+  }
+
+  if(!gistId){
+    // Step 2: Choose first-time vs existing
+    body.innerHTML = `
+      <div class="sync-info-box success">✓ Token validated</div>
+      <div class="sync-info-box">
+        <strong>First time setup?</strong> We'll create a new private Gist with your current data.
+        <br><strong>Already synced from another device?</strong> Paste the existing Gist ID.
+      </div>
+      <div class="sync-step">
+        <span class="num">A</span>
+        <div class="body">
+          <strong>First device — Create new Gist</strong>
+          Uploads your current ${state.albums.length} albums to a new private Gist.
+          <button class="btn btn-primary" onclick="syncSetupCreateNew()" style="margin-top:8px;width:100%">Create new Gist</button>
+        </div>
+      </div>
+      <div class="sync-step">
+        <span class="num">B</span>
+        <div class="body">
+          <strong>Connecting another device — Use existing Gist</strong>
+          Paste the Gist ID (looks like <code>a1b2c3d4...</code>):
+          <input type="text" id="sync-gist-input" placeholder="Gist ID" 
+            style="margin-top:6px;width:100%;padding:8px 10px;background:var(--bg);border:1px solid var(--border);border-radius:6px;color:var(--text);font-family:monospace;font-size:12px">
+          <button class="btn btn-primary" onclick="syncSetupConnect()" style="margin-top:8px;width:100%">Connect to existing Gist</button>
+        </div>
+      </div>
+      <div style="display:flex;gap:8px;justify-content:space-between;margin-top:8px">
+        <button class="btn" onclick="syncSetupForgetToken()" style="color:var(--red)">Forget token</button>
+        <button class="btn" onclick="closeSyncModal()">Cancel</button>
+      </div>`;
+    return;
+  }
+
+  // Already configured: show status + options
+  const lastPush = parseInt(localStorage.getItem(SYNC_LAST_PUSH_KEY) || '0');
+  const lastPull = parseInt(localStorage.getItem(SYNC_LAST_PULL_KEY) || '0');
+  const fmt = (t) => t ? new Date(t).toLocaleString() : 'never';
+  body.innerHTML = `
+    <div class="sync-info-box success">
+      <strong>✓ Sync active</strong><br>
+      Status: <strong>${syncState.status}</strong>
+      ${syncState.lastError ? `<br><span style="color:var(--red)">Error: ${escapeHtml(syncState.lastError)}</span>` : ''}
+    </div>
+    <div style="font-size:13px;color:var(--muted);line-height:1.8">
+      <div><strong style="color:var(--text)">Gist ID:</strong> <code style="background:var(--bg3);padding:2px 6px;border-radius:3px;font-size:11px;color:var(--accent);user-select:all">${escapeHtml(gistId)}</code> 
+        <button class="btn btn-icon" onclick="navigator.clipboard.writeText('${escapeHtml(gistId)}');toast('Copied!')" style="padding:2px 8px;font-size:11px;margin-left:6px">Copy</button>
+      </div>
+      <div><strong style="color:var(--text)">Last push:</strong> ${fmt(lastPush)}</div>
+      <div><strong style="color:var(--text)">Last pull:</strong> ${fmt(lastPull)}</div>
+      <div><strong style="color:var(--text)">Albums:</strong> ${state.albums.length} · <strong style="color:var(--text)">To Listen:</strong> ${state.toListen.length}</div>
+    </div>
+    <div class="sync-info-box">
+      <strong>📱 Connect another device:</strong> Open Ostinato on phone/Mac → Menu → ☁️ Set up sync → 
+      enter the same token + paste the Gist ID above.
+    </div>
+    <div style="display:flex;flex-wrap:wrap;gap:8px;justify-content:flex-end;margin-top:10px">
+      <button class="btn" onclick="syncManualPull()">⬇️ Pull now</button>
+      <button class="btn" onclick="syncManualPush()">⬆️ Push now</button>
+      <button class="btn" onclick="syncDisableConfirm()" style="color:var(--red)">Disable sync</button>
+      <button class="btn btn-primary" onclick="closeSyncModal()">Done</button>
+    </div>`;
+}
+
+async function syncSetupStep1(){
+  const input = document.getElementById('sync-token-input');
+  const token = (input.value || '').trim();
+  if(!token){ toast('Token required'); return; }
+  if(!token.startsWith('github_pat_') && !token.startsWith('ghp_')){
+    if(!confirm('Token does not start with github_pat_ or ghp_ — continue anyway?')) return;
+  }
+  toast('Validating token...');
+  try {
+    const username = await validateToken(token);
+    setSyncToken(token);
+    toast(`✓ Hello, ${username}!`);
+    renderSyncModal();
+  } catch(e){
+    alert(`Token validation failed: ${e.message}\n\nMake sure:\n1. Token has "Gists: Read and write" permission\n2. Token is not expired\n3. You copied the full token`);
+  }
+}
+
+async function syncSetupCreateNew(){
+  toast('Creating Gist...');
+  try {
+    const id = await createGist();
+    setSyncGistId(id);
+    localStorage.setItem(SYNC_LAST_PUSH_KEY, String(Date.now()));
+    startSync();
+    toast('✓ Sync activated!');
+    renderSyncModal();
+  } catch(e){
+    alert(`Failed to create Gist: ${e.message}`);
+  }
+}
+
+async function syncSetupConnect(){
+  const input = document.getElementById('sync-gist-input');
+  let id = (input.value || '').trim();
+  // Allow pasting full gist URL
+  const m = id.match(/[a-f0-9]{20,}/i);
+  if(m) id = m[0];
+  if(!id){ toast('Gist ID required'); return; }
+  toast('Connecting to Gist...');
+  setSyncGistId(id);
+  try {
+    const remote = await pullFromGist();
+    if(!confirm(`Connected! Cloud has ${remote.albums?.length || 0} albums and ${remote.toListen?.length || 0} to-listen items.\n\nReplace your local data with cloud data?`)){
+      setSyncGistId('');
+      return;
+    }
+    applySyncPayload(remote);
+    localStorage.setItem(SYNC_LAST_PUSH_KEY, String(remote.updatedAt || Date.now()));
+    startSync();
+    render();
+    toast('✓ Connected to cloud!');
+    renderSyncModal();
+  } catch(e){
+    setSyncGistId('');
+    alert(`Failed to connect: ${e.message}\n\nCheck the Gist ID is correct and your token has access.`);
+  }
+}
+
+function syncSetupForgetToken(){
+  if(!confirm('Forget the token? You will need to enter it again to use sync.')) return;
+  setSyncToken('');
+  syncState.enabled = false;
+  document.getElementById('btn-sync-status').style.display = 'none';
+  renderSyncModal();
+}
+
+async function syncManualPull(){
+  toast('Pulling from cloud...');
+  await syncPullOnce();
+}
+
+async function syncManualPush(){
+  toast('Pushing to cloud...');
+  try {
+    syncStatusUpdate('syncing');
+    await pushToGist();
+    localStorage.setItem(SYNC_LAST_PUSH_KEY, String(Date.now()));
+    syncState.lastSyncAt = Date.now();
+    syncStatusUpdate('synced');
+    toast('✓ Pushed');
+    renderSyncModal();
+  } catch(e){
+    syncStatusUpdate('error', e.message);
+    alert(`Push failed: ${e.message}`);
+  }
+}
+
+function syncDisableConfirm(){
+  if(!confirm('Disable sync on this device?\n\nYour data will remain on this device but stop syncing. The Gist on GitHub stays untouched (other devices keep working).')) return;
+  disableSync();
+  toast('Sync disabled');
+  closeSyncModal();
+}
+
+
 function populateDatalists(){
   // Combine static suggestions with any new values from user's current data
   const dynamicCountries = new Set([...COUNTRY_SUGGESTIONS]);
@@ -2026,6 +2496,14 @@ document.addEventListener('DOMContentLoaded', () => {
   loadGeoJSON();
   populateDatalists();
   wireDiscoverSwipe();
+  startSync();
+  // Wire sync status button + modal backdrop
+  const syncBtn = document.getElementById('btn-sync-status');
+  if(syncBtn) syncBtn.onclick = openSyncModal;
+  const syncModal = document.getElementById('sync-modal');
+  if(syncModal) syncModal.addEventListener('click', e => {
+    if(e.target.id === 'sync-modal') closeSyncModal();
+  });
 
   document.querySelectorAll('.chip').forEach(c => {
     c.onclick = () => { state.filter = c.dataset.filter; render(); };
@@ -2095,7 +2573,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
   document.addEventListener('keydown', e => {
     if(e.key === 'Escape'){
-      closeModal(); closeMenu(); closeDetailModal(); closeMove();
+      closeModal(); closeMenu(); closeDetailModal(); closeMove(); closeSyncModal();
       if(discoverState.active) closeDiscover();
     }
     if(discoverState.active){

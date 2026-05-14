@@ -873,7 +873,8 @@ function renderTabs(){
     <span>📻 To Listen</span>
     <span class="count">${tlCount}</span>
   </button>`;
-  tabs.innerHTML = yearTabs + tlTab;
+  // To Listen is now first (mobile-friendly: easier to reach with thumb)
+  tabs.innerHTML = tlTab + yearTabs;
   tabs.querySelectorAll('.year-tab').forEach(t => {
     t.onclick = () => {
       if(t.dataset.tolisten){

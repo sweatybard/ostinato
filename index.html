@@ -337,6 +337,31 @@ a{color:var(--blue);text-decoration:none}
  background:linear-gradient(transparent,rgba(0,0,0,.85));padding:14px 6px 4px;
  color:#fff;font-size:10px;line-height:1.2;text-align:center}
 .discogs-loading{text-align:center;padding:30px;color:var(--muted)}
+
+/* On this day widget */
+.otd-banner{margin:0 0 14px;padding:12px 14px;border-radius:10px;
+ background:linear-gradient(135deg, rgba(245,197,24,.08), rgba(184,123,217,.06));
+ border:1px solid var(--border);position:relative;overflow:hidden}
+.otd-header{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:8px;flex-wrap:wrap}
+.otd-label{font-size:11px;font-weight:600;color:var(--accent);letter-spacing:.6px;text-transform:uppercase}
+.otd-close{background:transparent;color:var(--muted);font-size:16px;padding:0 6px;line-height:1;cursor:pointer}
+.otd-close:hover{color:var(--text)}
+.otd-list{display:flex;gap:10px;overflow-x:auto;padding-bottom:2px;scrollbar-width:thin}
+.otd-card{display:flex;gap:8px;align-items:center;padding:7px;border-radius:8px;background:var(--card);
+ border:1px solid var(--border);min-width:240px;max-width:300px;cursor:pointer;
+ transition:transform .15s,border-color .15s}
+.otd-card:hover{transform:translateY(-1px);border-color:var(--accent)}
+.otd-cover{width:44px;height:44px;min-width:44px;border-radius:5px;background:var(--bg3);
+ overflow:hidden;display:flex;align-items:center;justify-content:center;font-size:14px;color:var(--muted)}
+.otd-cover img{width:100%;height:100%;object-fit:cover}
+.otd-cover.placeholder{font-weight:700;font-family:Georgia,serif;color:rgba(255,255,255,.95)}
+.otd-info{flex:1;min-width:0}
+.otd-year-pill{font-size:10px;font-weight:700;background:var(--accent);color:#000;padding:1px 6px;border-radius:8px;margin-right:4px}
+.otd-title{font-size:13px;font-weight:600;line-height:1.25;
+ overflow:hidden;text-overflow:ellipsis;display:-webkit-box;-webkit-line-clamp:1;-webkit-box-orient:vertical}
+.otd-artist{font-size:11px;color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;margin-top:1px}
+@media (max-width:640px){.otd-card{min-width:200px;max-width:230px}}
+
 @media (max-width:640px){.discogs-grid{grid-template-columns:repeat(2,1fr)}}
 
 .toast{position:fixed;bottom:20px;left:50%;transform:translateX(-50%) translateY(100px);
@@ -556,7 +581,7 @@ a{color:var(--blue);text-decoration:none}
    <button class="btn" onclick="clearCoverCache()">🗑️ Clear cover cache</button>
    <button class="btn" onclick="resetData()" style="color:var(--red)">♻️ Reset to original data</button>
    <div style="font-size:12px;color:var(--muted);margin-top:10px;text-align:center">
-    Ostinato v9 · Local + cloud sync
+    Ostinato v10 · Local + cloud sync
    </div>
   </div>
  </div>
@@ -608,6 +633,7 @@ const COVER_KEY = 'ostinato-covers';
 const THEME_KEY = 'ostinato-theme';
 const GEOJSON_KEY = 'ostinato-geojson';
 const VIEW_KEY = 'ostinato-view';
+const SORT_KEY = 'ostinato-sort';
 
 const YEARS = [2026, 2025, 2024, 2023, 2022, 2021];
 
@@ -617,7 +643,7 @@ let state = {
   currentYear: 2026,
   filter: 'all',
   search: '',
-  sort: 'custom',
+  sort: 'added-desc',
   group: 'none',
   layout: 'list',  // 'list' | 'wall'
   view: 'albums',  // 'albums' | 'stats' | 'tolisten'
@@ -683,6 +709,7 @@ function loadData(){
     state.toListen = t ? JSON.parse(t) : [];
   } catch(e){ state.toListen = []; }
   try { const v = localStorage.getItem(VIEW_KEY); if(v) state.layout = v; } catch(e){}
+  try { const s = localStorage.getItem(SORT_KEY); if(s) state.sort = s; } catch(e){}
   backfillCreatedAt();
   // Seed cover cache from any manual coverUrl values
   if(typeof seedCoverCacheFromAlbums === 'function') seedCoverCacheFromAlbums();
@@ -1112,7 +1139,9 @@ function renderAlbums(){
     return;
   }
 
-  let html = banner;
+  // On This Day banner (current year only, no active filters)
+  const otdHtml = renderOTDBanner();
+  let html = otdHtml + banner;
   if(state.layout === 'wall'){
     // WALL view
     if(state.countryFilter && state.group==='none'){
@@ -1164,6 +1193,7 @@ function renderAlbums(){
   }
   main.innerHTML = html;
   attachCardHandlers();
+  attachOTDHandlers();
   lazyLoadCovers();
 }
 
@@ -2182,6 +2212,9 @@ function closeMenu(){ document.getElementById('menu-modal').classList.remove('sh
 
 /* ============= MAIN RENDER ============= */
 function render(){
+  // Sync sort dropdown with state
+  const sortEl = document.getElementById('sort');
+  if(sortEl && sortEl.value !== state.sort) sortEl.value = state.sort;
   renderTabs();
   if(state.view === 'stats') renderStats();
   else if(state.view === 'tolisten') renderToListen();
@@ -2910,6 +2943,79 @@ function closeDiscogsModal(){
 }
 
 
+/* ============= ON THIS DAY ============= */
+function computeOnThisDay(){
+  const now = new Date();
+  const todayMonth = now.getMonth();
+  const todayDate = now.getDate();
+  const currentYear = now.getFullYear();
+  const matches = [];
+  for(const a of state.albums){
+    if(!a.createdAt) continue;
+    const d = new Date(a.createdAt);
+    if(d.getFullYear() >= currentYear) continue;
+    const sameMonth = d.getMonth() === todayMonth;
+    const dayDiff = Math.abs(d.getDate() - todayDate);
+    if(sameMonth && dayDiff <= 3){
+      matches.push({album: a, when: d, gap: dayDiff});
+    }
+  }
+  matches.sort((x, y) => {
+    if(x.gap !== y.gap) return x.gap - y.gap;
+    return y.when.getFullYear() - x.when.getFullYear();
+  });
+  return matches.slice(0, 8);
+}
+
+function renderOTDBanner(){
+  if(state.view !== 'albums') return '';
+  if(state.currentYear !== Math.max(...YEARS)) return '';
+  if(window._otdDismissed) return '';
+  if(state.search || state.countryFilter || state.filter !== 'all') return '';
+  const matches = computeOnThisDay();
+  if(!matches.length) return '';
+  const cards = matches.map(({album: a, when}) => {
+    const k = coverKey(a.artist, a.title);
+    const cached = coverCache[k];
+    const coverContent = cached
+      ? `<img src="${escapeHtml(cached)}" alt="">`
+      : placeholderLetter(a.artist, a.title);
+    const coverClass = cached ? '' : 'placeholder';
+    const coverStyle = cached ? '' : `style="background:${placeholderStyle(a.artist, a.title)}"`;
+    const yearGap = (new Date()).getFullYear() - when.getFullYear();
+    const yearLabel = yearGap === 1 ? '1 yr ago' : `${yearGap} yrs ago`;
+    return `<div class="otd-card" data-id="${a.id}">
+      <div class="otd-cover ${coverClass}" ${coverStyle}>${coverContent}</div>
+      <div class="otd-info">
+        <div class="otd-title"><span class="otd-year-pill">${yearLabel}</span>${a.keeper ? '⭐ ' : ''}${escapeHtml(a.title)||'Untitled'}</div>
+        <div class="otd-artist">${escapeHtml(a.artist)||''}</div>
+      </div>
+    </div>`;
+  }).join('');
+  return `<div class="otd-banner" id="otd-banner">
+      <div class="otd-header">
+        <span class="otd-label">📅 On this day</span>
+        <button class="otd-close" onclick="dismissOTD()" title="Hide for now">✕</button>
+      </div>
+      <div class="otd-list">${cards}</div>
+    </div>`;
+}
+
+function dismissOTD(){
+  window._otdDismissed = true;
+  const el = document.getElementById('otd-banner');
+  if(el) el.remove();
+}
+
+function attachOTDHandlers(){
+  document.querySelectorAll('.otd-card').forEach(card => {
+    card.onclick = () => {
+      const id = card.dataset.id;
+      if(id) openDetailModal(id, 'albums');
+    };
+  });
+}
+
 function populateDatalists(){
   // Combine static suggestions with any new values from user's current data
   const dynamicCountries = new Set([...COUNTRY_SUGGESTIONS]);
@@ -2954,7 +3060,9 @@ document.addEventListener('DOMContentLoaded', () => {
     state.search = e.target.value; render();
   });
   document.getElementById('sort').addEventListener('change', (e) => {
-    state.sort = e.target.value; render();
+    state.sort = e.target.value;
+    try { localStorage.setItem(SORT_KEY, state.sort); } catch(err){}
+    render();
   });
   document.getElementById('group').addEventListener('change', (e) => {
     state.group = e.target.value; render();

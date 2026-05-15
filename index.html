@@ -513,6 +513,17 @@ a{color:var(--blue);text-decoration:none}
  </div>
 </div>
 
+<!-- Discogs settings modal -->
+<div class="modal-backdrop" id="discogs-settings-modal">
+ <div class="modal" style="max-width:480px">
+  <div class="modal-header">
+   <div class="modal-title">🔍 Discogs Settings</div>
+   <button class="btn-icon" onclick="closeDiscogsSettings()">✕</button>
+  </div>
+  <div class="modal-body" id="discogs-settings-body"></div>
+ </div>
+</div>
+
 <!-- Sync setup modal -->
 <div class="modal-backdrop" id="sync-modal">
  <div class="modal" style="max-width:480px">
@@ -535,6 +546,7 @@ a{color:var(--blue);text-decoration:none}
   </div>
   <div class="modal-body">
    <button class="btn" onclick="openSyncModal()" id="btn-sync-menu">☁️ Set up sync</button>
+   <button class="btn" onclick="openDiscogsSettings()">🔍 Discogs settings</button>
    <button class="btn" onclick="warmCovers()" id="btn-warm">🖼️ Pre-fetch all covers</button>
    <button class="btn" onclick="generateShareImage()">📸 Year in review (image)</button>
    <button class="btn" onclick="exportJSON()">💾 Export JSON backup</button>
@@ -544,7 +556,7 @@ a{color:var(--blue);text-decoration:none}
    <button class="btn" onclick="clearCoverCache()">🗑️ Clear cover cache</button>
    <button class="btn" onclick="resetData()" style="color:var(--red)">♻️ Reset to original data</button>
    <div style="font-size:12px;color:var(--muted);margin-top:10px;text-align:center">
-    Ostinato v8 · Local + cloud sync
+    Ostinato v9 · Local + cloud sync
    </div>
   </div>
  </div>
@@ -809,12 +821,43 @@ async function fetchCoverMB(artist, title){
     return `https://coverartarchive.org/release-group/${rg.id}/front-250`;
   } catch(e){ return null; }
 }
+async function fetchCoverDiscogs(artist, title){
+  const token = getDiscogsToken();
+  if(!token) return null;
+  try {
+    const q = encodeURIComponent(`${artist} ${title}`.trim());
+    const url = `https://api.discogs.com/database/search?q=${q}&type=release&per_page=5`;
+    const r = await fetch(url, {
+      headers: {
+        'Accept': 'application/json',
+        'User-Agent': 'Ostinato/1.0',
+        'Authorization': `Discogs token=${token}`,
+      }
+    });
+    if(!r.ok) return null;
+    const data = await r.json();
+    const results = (data.results || []).filter(x => x.cover_image && !x.cover_image.endsWith('spacer.gif'));
+    if(!results.length) return null;
+    // Fuzzy match: check if title and/or artist appear in result.title (Discogs format: "Artist - Title")
+    const qa = (artist||'').toLowerCase();
+    const qt = (title||'').toLowerCase();
+    for(const res of results){
+      const rt = (res.title||'').toLowerCase();
+      const aMatch = qa && (rt.includes(qa.slice(0,6)) || qa.length>3 && rt.includes(qa.slice(0,4)));
+      const tMatch = qt && (rt.includes(qt.slice(0,6)) || qt.length>3 && rt.includes(qt.slice(0,4)));
+      if(aMatch || tMatch) return res.cover_image;
+    }
+    // No fuzzy match — fall back to top result if it exists
+    return results[0].cover_image;
+  } catch(e){ return null; }
+}
 async function fetchCover(artist, title){
   const k = coverKey(artist, title);
   if(coverCache[k] !== undefined) return coverCache[k];
   if(!artist && !title){ coverCache[k] = null; return null; }
   let url = await fetchCoveriTunes(artist, title);
   if(!url) url = await fetchCoverMB(artist, title);
+  if(!url) url = await fetchCoverDiscogs(artist, title);
   coverCache[k] = url || null;
   if(!fetchCover._t){
     fetchCover._t = setTimeout(()=>{ saveCovers(); fetchCover._t=null; }, 1500);
@@ -2214,6 +2257,118 @@ const SYNC_LAST_PUSH_KEY = 'ostinato-sync-last-push';
 const SYNC_LAST_PULL_KEY = 'ostinato-sync-last-pull';
 const SYNC_FILENAME = 'ostinato-data.json';
 
+/* ============= DISCOGS TOKEN ============= */
+const DISCOGS_TOKEN_KEY = 'ostinato-discogs-token';
+function getDiscogsToken(){ return localStorage.getItem(DISCOGS_TOKEN_KEY) || ''; }
+function setDiscogsToken(t){
+  if(t) localStorage.setItem(DISCOGS_TOKEN_KEY, t);
+  else localStorage.removeItem(DISCOGS_TOKEN_KEY);
+}
+async function validateDiscogsToken(token){
+  // Hit /oauth/identity which only works with a valid token
+  const r = await fetch('https://api.discogs.com/oauth/identity', {
+    headers: {
+      'Authorization': `Discogs token=${token}`,
+      'User-Agent': 'Ostinato/1.0',
+      'Accept': 'application/json',
+    }
+  });
+  if(!r.ok){
+    let msg = `HTTP ${r.status}`;
+    try { const body = await r.json(); if(body.message) msg = body.message; } catch(e){}
+    throw new Error(msg);
+  }
+  const data = await r.json();
+  return data.username;
+}
+function openDiscogsSettings(){
+  closeMenu();
+  renderDiscogsSettings();
+  document.getElementById('discogs-settings-modal').classList.add('show');
+}
+function closeDiscogsSettings(){
+  document.getElementById('discogs-settings-modal').classList.remove('show');
+}
+function renderDiscogsSettings(){
+  const body = document.getElementById('discogs-settings-body');
+  const token = getDiscogsToken();
+  if(!token){
+    body.innerHTML = `
+      <div class="sync-info-box">
+        <strong>What is this?</strong><br>
+        Discogs has the largest album cover database — perfect for indie/experimental music
+        that iTunes doesn't index well. You need a free Discogs personal access token.
+      </div>
+      <div class="sync-step">
+        <span class="num">1</span>
+        <div class="body">
+          <strong>Get your token</strong>
+          Go to <a href="https://www.discogs.com/settings/developers" target="_blank">discogs.com/settings/developers</a>
+          → "Generate new token" → copy it (40 characters, no prefix).
+        </div>
+      </div>
+      <div class="sync-step">
+        <span class="num">2</span>
+        <div class="body">
+          <strong>Paste your token</strong>
+          <input type="password" id="discogs-token-input" placeholder="Paste your Discogs token..."
+            style="margin-top:6px;width:100%;padding:8px 10px;background:var(--bg);border:1px solid var(--border);border-radius:6px;color:var(--text);font-family:monospace;font-size:12px">
+        </div>
+      </div>
+      <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:8px">
+        <button class="btn" onclick="closeDiscogsSettings()">Cancel</button>
+        <button class="btn btn-primary" onclick="discogsSettingsSave()">Save & validate</button>
+      </div>`;
+    return;
+  }
+  body.innerHTML = `
+    <div class="sync-info-box success">
+      <strong>✓ Discogs token configured</strong><br>
+      Token: <code style="background:var(--bg3);padding:2px 6px;border-radius:3px;font-size:11px">${'•'.repeat(8)}${escapeHtml(token.slice(-4))}</code>
+    </div>
+    <div style="font-size:13px;color:var(--muted);line-height:1.7">
+      Discogs is now used as a fallback when iTunes and MusicBrainz don't find a cover, 
+      and powers the "🔍 Discogs" cover search button in the edit modal.
+    </div>
+    <div class="sync-info-box">
+      <strong>Note:</strong> Token is stored only on this device. To use Discogs on another device,
+      paste the same token there too (or generate a separate one — both work).
+    </div>
+    <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:10px">
+      <button class="btn" onclick="discogsSettingsRemove()" style="color:var(--red)">Remove token</button>
+      <button class="btn btn-primary" onclick="closeDiscogsSettings()">Done</button>
+    </div>`;
+}
+async function discogsSettingsSave(){
+  const input = document.getElementById('discogs-token-input');
+  const token = (input.value || '').trim();
+  if(!token){ toast('Token required'); return; }
+  toast('Validating token...');
+  try {
+    const username = await validateDiscogsToken(token);
+    setDiscogsToken(token);
+    toast(`✓ Hello, ${username}!`);
+    renderDiscogsSettings();
+    // Clear the cover cache for albums that previously failed,
+    // so they'll retry with Discogs as fallback
+    const failedKeys = Object.entries(coverCache).filter(([k,v]) => v === null).map(([k]) => k);
+    failedKeys.forEach(k => delete coverCache[k]);
+    saveCovers();
+  } catch(e){
+    alert(`Token validation failed: ${e.message}
+
+Make sure:
+1. Token is exactly as shown by Discogs
+2. No extra spaces`);
+  }
+}
+function discogsSettingsRemove(){
+  if(!confirm('Remove Discogs token from this device?')) return;
+  setDiscogsToken('');
+  toast('Token removed');
+  renderDiscogsSettings();
+}
+
 let syncState = {
   enabled: false,
   status: 'offline',  // 'offline' | 'syncing' | 'synced' | 'error'
@@ -2671,11 +2826,24 @@ async function openDiscogsSearch(){
   if(!artist && !title){ toast('Enter artist or title first'); return; }
   const modal = document.getElementById('discogs-modal');
   const body = document.getElementById('discogs-modal-body');
+
+  const token = getDiscogsToken();
+  if(!token){
+    body.innerHTML = `<div style="text-align:center;padding:24px">
+      <div style="font-size:14px;color:var(--text);margin-bottom:10px">🔍 Discogs token required</div>
+      <div style="color:var(--muted);font-size:13px;margin-bottom:14px;line-height:1.5">
+        Add your free Discogs personal access token to enable cover search.<br>
+        Get one at <a href="https://www.discogs.com/settings/developers" target="_blank">discogs.com/settings/developers</a>.
+      </div>
+      <button class="btn btn-primary" onclick="closeDiscogsModal();openDiscogsSettings()">⚙️ Open Discogs settings</button>
+    </div>`;
+    modal.classList.add('show');
+    return;
+  }
+
   body.innerHTML = `<div class="discogs-loading">⏳ Searching Discogs...</div>`;
   modal.classList.add('show');
 
-  // Discogs database search — no auth needed for low rate
-  // Format: https://api.discogs.com/database/search?q=ARTIST+TITLE&type=release
   const q = encodeURIComponent(`${artist} ${title}`.trim());
   const url = `https://api.discogs.com/database/search?q=${q}&type=release&per_page=12`;
 
@@ -2684,13 +2852,14 @@ async function openDiscogsSearch(){
       headers: {
         'Accept': 'application/json',
         'User-Agent': 'Ostinato/1.0',
+        'Authorization': `Discogs token=${token}`,
       }
     });
     if(!r.ok){
       if(r.status === 401 || r.status === 403){
         body.innerHTML = `<div style="color:var(--muted);text-align:center;padding:20px;font-size:13px">
-          ⚠️ Discogs requires authentication for this search.<br>
-          You can still paste a cover URL manually in the field above.
+          ⚠️ Discogs token rejected (HTTP ${r.status}).<br>
+          Try regenerating the token in <a href="javascript:void(0)" onclick="closeDiscogsModal();openDiscogsSettings()">Discogs settings</a>.
         </div>`;
         return;
       }
@@ -2834,6 +3003,9 @@ document.addEventListener('DOMContentLoaded', () => {
   document.getElementById('discogs-modal').addEventListener('click', e => {
     if(e.target.id === 'discogs-modal') closeDiscogsModal();
   });
+  document.getElementById('discogs-settings-modal').addEventListener('click', e => {
+    if(e.target.id === 'discogs-settings-modal') closeDiscogsSettings();
+  });
   // Reset the autofill cache when opening the modal fresh
   document.getElementById('f-artist').addEventListener('focus', () => { autofillLastKey = null; });
 
@@ -2852,7 +3024,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
   document.addEventListener('keydown', e => {
     if(e.key === 'Escape'){
-      closeModal(); closeMenu(); closeDetailModal(); closeMove(); closeSyncModal(); closeDiscogsModal();
+      closeModal(); closeMenu(); closeDetailModal(); closeMove(); closeSyncModal(); closeDiscogsModal(); closeDiscogsSettings();
       if(discoverState.active) closeDiscover();
     }
     if(discoverState.active){

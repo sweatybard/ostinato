@@ -327,6 +327,17 @@ a{color:var(--blue);text-decoration:none}
  border:1px solid var(--keeper);font-size:13px;margin-bottom:10px;color:var(--text)}
 .sync-info-box.warning{background:rgba(232,90,90,.08);border-color:var(--red);color:var(--text)}
 .sync-info-box.success{background:rgba(90,191,110,.08);border-color:var(--green);color:var(--text)}
+.discogs-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-top:8px}
+.discogs-result{aspect-ratio:1;background:var(--bg3);border-radius:6px;cursor:pointer;
+ overflow:hidden;position:relative;transition:transform .15s,box-shadow .15s;
+ display:flex;align-items:center;justify-content:center;color:var(--muted);font-size:12px}
+.discogs-result:hover{transform:scale(1.04);box-shadow:0 4px 12px rgba(0,0,0,.3)}
+.discogs-result img{width:100%;height:100%;object-fit:cover}
+.discogs-result .label{position:absolute;bottom:0;left:0;right:0;
+ background:linear-gradient(transparent,rgba(0,0,0,.85));padding:14px 6px 4px;
+ color:#fff;font-size:10px;line-height:1.2;text-align:center}
+.discogs-loading{text-align:center;padding:30px;color:var(--muted)}
+@media (max-width:640px){.discogs-grid{grid-template-columns:repeat(2,1fr)}}
 
 .toast{position:fixed;bottom:20px;left:50%;transform:translateX(-50%) translateY(100px);
  background:var(--bg3);padding:10px 18px;border-radius:20px;
@@ -346,9 +357,13 @@ a{color:var(--blue);text-decoration:none}
  .cover{width:60px;height:60px;min-width:60px}
  .toolbar{padding:8px 10px;gap:6px;top:82px}
  .btn{padding:6px 10px;font-size:12px}
- .year-tab{padding:6px 10px;font-size:13px}
+ .year-tabs{gap:6px;padding:2px 0 4px}
+ .year-tab{padding:9px 13px;font-size:14px;min-height:38px;gap:7px}
  .year-tab .year-full{display:none}
  .year-tab .year-short{display:inline}
+ /* Hide keeper count badge on year tabs (mobile only) — show only album count */
+ .year-tab .keeper-sep{display:none}
+ .year-tab .count{font-size:12px;padding:1px 8px}
  .bar-label{width:90px;min-width:90px;font-size:12px}
  .discover-nav{width:40px;height:40px;font-size:18px}
  .discover-nav.prev{left:10px}
@@ -392,6 +407,8 @@ a{color:var(--blue);text-decoration:none}
  <button class="chip" data-filter="keepers">⭐ Keepers</button>
  <select class="select" id="sort">
   <option value="custom">Custom order</option>
+  <option value="added-desc">Recently added (new→old)</option>
+  <option value="added">Date added (old→new)</option>
   <option value="artist">Artist A→Z</option>
   <option value="artist-desc">Artist Z→A</option>
   <option value="title">Title A→Z</option>
@@ -435,6 +452,17 @@ a{color:var(--blue);text-decoration:none}
    </div>
    <div class="field" id="f-listen-wrap"><label>Listen Year</label><input id="f-listen-year" type="number"></div>
    <div class="field"><label>Notes</label><textarea id="f-notes"></textarea></div>
+   <div class="field">
+    <label>Cover image URL <span style="color:var(--muted);font-weight:400;text-transform:none">(optional — overrides auto-fetch)</span></label>
+    <div style="display:flex;gap:6px;align-items:stretch">
+      <input id="f-cover-url" type="text" placeholder="https://..." style="flex:1" autocomplete="off">
+      <button type="button" class="btn" onclick="openDiscogsSearch()" title="Search Discogs covers">🔍 Discogs</button>
+    </div>
+    <div id="f-cover-preview" style="margin-top:6px;display:none">
+      <img id="f-cover-preview-img" style="max-width:80px;max-height:80px;border-radius:4px;border:1px solid var(--border)">
+      <button type="button" class="btn btn-icon" onclick="clearCoverUrl()" style="margin-left:6px;font-size:12px">Clear</button>
+    </div>
+   </div>
    <div class="field-inline" id="f-keeper-wrap"><input type="checkbox" id="f-keeper"><label for="f-keeper" style="font-size:14px;color:var(--text);text-transform:none;letter-spacing:0">⭐ Keeper</label></div>
   </div>
   <div class="modal-footer">
@@ -474,6 +502,17 @@ a{color:var(--blue);text-decoration:none}
  </div>
 </div>
 
+<!-- Discogs cover search modal -->
+<div class="modal-backdrop" id="discogs-modal">
+ <div class="modal" style="max-width:520px">
+  <div class="modal-header">
+   <div class="modal-title">🔍 Search Discogs covers</div>
+   <button class="btn-icon" onclick="closeDiscogsModal()">✕</button>
+  </div>
+  <div class="modal-body" id="discogs-modal-body"></div>
+ </div>
+</div>
+
 <!-- Sync setup modal -->
 <div class="modal-backdrop" id="sync-modal">
  <div class="modal" style="max-width:480px">
@@ -505,7 +544,7 @@ a{color:var(--blue);text-decoration:none}
    <button class="btn" onclick="clearCoverCache()">🗑️ Clear cover cache</button>
    <button class="btn" onclick="resetData()" style="color:var(--red)">♻️ Reset to original data</button>
    <div style="font-size:12px;color:var(--muted);margin-top:10px;text-align:center">
-    Ostinato v7 · Local + cloud sync
+    Ostinato v8 · Local + cloud sync
    </div>
   </div>
  </div>
@@ -632,6 +671,29 @@ function loadData(){
     state.toListen = t ? JSON.parse(t) : [];
   } catch(e){ state.toListen = []; }
   try { const v = localStorage.getItem(VIEW_KEY); if(v) state.layout = v; } catch(e){}
+  backfillCreatedAt();
+  // Seed cover cache from any manual coverUrl values
+  if(typeof seedCoverCacheFromAlbums === 'function') seedCoverCacheFromAlbums();
+}
+function backfillCreatedAt(){
+  // Albums missing createdAt → synthesize from listen_year + order so original Excel order is preserved
+  // Synthetic timestamp: Jan 1 of listen_year + (order * 1 minute) — guarantees uniqueness + ordering
+  let mutated = false;
+  for(const a of state.albums){
+    if(!a.createdAt){
+      const yr = a.listen_year || 2020;
+      const ord = a.order || 0;
+      a.createdAt = new Date(yr, 0, 1).getTime() + ord * 60000;
+      mutated = true;
+    }
+  }
+  for(const a of state.toListen){
+    if(!a.createdAt){ a.createdAt = (a.order || 0) * 60000 + 1577836800000; mutated = true; }
+  }
+  if(mutated){
+    try { localStorage.setItem(STORAGE_KEY, JSON.stringify(state.albums)); } catch(e){}
+    try { localStorage.setItem(TOLISTEN_KEY, JSON.stringify(state.toListen)); } catch(e){}
+  }
 }
 function saveData(){
   try { localStorage.setItem(STORAGE_KEY, JSON.stringify(state.albums)); }
@@ -864,7 +926,7 @@ function renderTabs(){
     return `<button class="year-tab ${cls}" data-year="${y}">
       <span class="year-full">${y}</span>
       <span class="year-short">'${String(y).slice(2)}</span>
-      <span class="count">${count}${keepers?` · <span class="kcount">${keepers}⭐</span>`:''}</span>
+      <span class="count">${count}${keepers?`<span class="keeper-sep"> · <span class="kcount">${keepers}⭐</span></span>`:''}</span>
     </button>`;
   }).join('');
   const tlCount = state.toListen.length;
@@ -909,6 +971,8 @@ function filterAndSort(list){
   }
   const cmp = {
     'custom': (a,b) => a.order - b.order,
+    'added-desc': (a,b) => (b.createdAt||0) - (a.createdAt||0),
+    'added': (a,b) => (a.createdAt||0) - (b.createdAt||0),
     'artist': (a,b) => (a.artist||'').localeCompare(b.artist||''),
     'artist-desc': (a,b) => (b.artist||'').localeCompare(a.artist||''),
     'title': (a,b) => (a.title||'').localeCompare(b.title||''),
@@ -1077,6 +1141,8 @@ function renderToListen(){
   }
   const cmp = {
     'custom': (a,b) => (a.order||0) - (b.order||0),
+    'added-desc': (a,b) => (b.createdAt||0) - (a.createdAt||0),
+    'added': (a,b) => (a.createdAt||0) - (b.createdAt||0),
     'artist': (a,b) => (a.artist||'').localeCompare(b.artist||''),
     'artist-desc': (a,b) => (b.artist||'').localeCompare(a.artist||''),
     'title': (a,b) => (a.title||'').localeCompare(b.title||''),
@@ -1214,6 +1280,8 @@ function openEditModal(id, source){
   document.getElementById('f-listen-year').value = a?.listen_year || state.currentYear || 2026;
   document.getElementById('f-notes').value = a?.notes || '';
   document.getElementById('f-keeper').checked = !!a?.keeper;
+  document.getElementById('f-cover-url').value = a?.coverUrl || '';
+  updateCoverPreview();
   document.getElementById('f-listen-wrap').style.display = isToListen ? 'none' : '';
   document.getElementById('f-keeper-wrap').style.display = isToListen ? 'none' : '';
   document.getElementById('btn-delete').style.display = a ? '' : 'none';
@@ -1230,6 +1298,7 @@ function saveModal(){
     country: document.getElementById('f-country').value.trim(),
     label: document.getElementById('f-label').value.trim(),
     notes: document.getElementById('f-notes').value.trim(),
+    coverUrl: document.getElementById('f-cover-url').value.trim(),
   };
   if(!isToListen){
     vals.listen_year = parseInt(document.getElementById('f-listen-year').value) || state.currentYear;
@@ -1246,18 +1315,24 @@ function saveModal(){
     if(isToListen){
       const maxOrder = state.toListen.length ? Math.max(...state.toListen.map(a => a.order||0)) : -1;
       const newId = `tl-${Date.now()}`;
-      state.toListen.push({id: newId, order: maxOrder+1, keeper:false, ...vals});
+      state.toListen.push({id: newId, order: maxOrder+1, keeper:false, createdAt: Date.now(), ...vals});
     } else {
       const yearAlbums = state.albums.filter(a => a.listen_year === vals.listen_year);
       const maxOrder = yearAlbums.length ? Math.max(...yearAlbums.map(a => a.order)) : -1;
       const newId = `${vals.listen_year}-new-${Date.now()}`;
-      state.albums.push({id: newId, order: maxOrder+1, ...vals});
+      state.albums.push({id: newId, order: maxOrder+1, createdAt: Date.now(), ...vals});
       state.currentYear = vals.listen_year;
       state.view = 'albums';
     }
     toast('Added');
   }
   if(isToListen) saveToListen(); else saveData();
+  // Apply manual coverUrl to the cover cache (overrides auto-fetch)
+  if(vals.coverUrl){
+    const k = coverKey(vals.artist, vals.title);
+    coverCache[k] = vals.coverUrl;
+    saveCovers();
+  }
   populateDatalists();
   closeModal();
   render();
@@ -1433,7 +1508,7 @@ function confirmMove(){
   const yearAlbums = state.albums.filter(x => x.listen_year === year);
   const maxOrder = yearAlbums.length ? Math.max(...yearAlbums.map(x => x.order)) : -1;
   state.albums.push({
-    id: `${year}-moved-${Date.now()}`, order: maxOrder + 1,
+    id: `${year}-moved-${Date.now()}`, order: maxOrder + 1, createdAt: Date.now(),
     artist: a.artist, title: a.title, genre: a.genre,
     release_year: a.release_year, country: a.country,
     label: a.label, notes: a.notes,
@@ -1741,141 +1816,48 @@ function renderDotMap(countryMap){
     <text x="${W/2}" y="30" text-anchor="middle" fill="var(--muted)" font-size="14">⚠️ Couldn't load world map — showing dots</text>${dots}</svg>`;
 }
 
-/* ============= SHARE IMAGE (Year in review) ============= */
+/* ============= SHARE IMAGE — Year in Review (redesigned) ============= */
 async function generateShareImage(){
+  // Choose format based on device hint — show a quick chooser
+  const formatChoice = await chooseShareFormat();
+  if(!formatChoice) return;
   closeMenu();
   const year = state.currentYear;
   const yearAlbums = state.albums.filter(a => a.listen_year === year);
   if(!yearAlbums.length){ toast('No albums in ' + year); return; }
-  const keepers = yearAlbums.filter(a => a.keeper);
   toast('Generating image...');
+
   const canvas = document.getElementById('share-canvas');
-  const W = 1080, H = 1080;
+  // Set dimensions based on format
+  const W = 1080;
+  const H = formatChoice === 'story' ? 1920 : 1080;
   canvas.width = W; canvas.height = H;
   const ctx = canvas.getContext('2d');
 
-  // Background
+  // === Theme ===
   const isDark = document.documentElement.getAttribute('data-theme') === 'dark';
   const bg = isDark ? '#1a1a1a' : '#f5f5f5';
   const fg = isDark ? '#e8e8e8' : '#1a1a1a';
   const muted = isDark ? '#9a9a9a' : '#666';
   const accent = '#f5c518';
-  ctx.fillStyle = bg;
-  ctx.fillRect(0, 0, W, H);
 
-  // Header bar
-  const headerH = 80;
-  ctx.fillStyle = isDark ? '#242424' : '#ffffff';
-  ctx.fillRect(0, 0, W, headerH);
-  // Logo
-  ctx.fillStyle = accent;
-  ctx.fillRect(40, 22, 36, 36);
-  ctx.roundRect && ctx.roundRect(40, 22, 36, 36, 6);
-  ctx.fillStyle = '#1a1a1a';
-  ctx.font = 'italic 700 22px Georgia, serif';
-  ctx.textBaseline = 'middle';
-  ctx.textAlign = 'center';
-  ctx.fillText('O', 58, 40);
-  // Title
-  ctx.textAlign = 'left';
-  ctx.fillStyle = fg;
-  ctx.font = '600 26px -apple-system, BlinkMacSystemFont, sans-serif';
-  ctx.fillText('Ostinato', 92, 34);
-  ctx.fillStyle = muted;
-  ctx.font = '400 13px sans-serif';
-  ctx.fillText('MUSIC, KEPT.', 92, 54);
-  // Year
-  ctx.fillStyle = fg;
-  ctx.font = '700 40px sans-serif';
-  ctx.textAlign = 'right';
-  ctx.fillText(year, W - 40, 40);
+  const keepers = yearAlbums.filter(a => a.keeper);
 
-  // Title section
-  ctx.fillStyle = muted;
-  ctx.font = '600 16px sans-serif';
-  ctx.textAlign = 'left';
-  ctx.fillText('YEAR IN REVIEW', 40, 130);
-  ctx.fillStyle = fg;
-  ctx.font = '700 54px sans-serif';
-  ctx.fillText(`${yearAlbums.length} albums`, 40, 195);
-  ctx.fillStyle = accent;
-  ctx.font = '700 36px sans-serif';
-  ctx.fillText(`${keepers.length} keepers (${yearAlbums.length?Math.round(keepers.length/yearAlbums.length*100):0}%)`, 40, 250);
+  // === Pre-fetch covers for the collage ===
+  // Pick keepers (or all albums if no keepers) — random selection of up to 25
+  let collagePool = keepers.length >= 12 ? keepers : yearAlbums;
+  collagePool = [...collagePool].sort(() => Math.random() - 0.5);
+  const collageCount = Math.min(25, collagePool.length);
+  const collage = collagePool.slice(0, collageCount);
 
-  // Top genres
-  const genreMap = {};
-  yearAlbums.forEach(a => { if(a.genre){ const g=a.genre.trim(); genreMap[g]=(genreMap[g]||0)+1; } });
-  const topGenres = Object.entries(genreMap).sort((a,b)=>b[1]-a[1]).slice(0,5);
-  const countryMap = {};
-  yearAlbums.forEach(a => { const iso = normalizeCountry(a.country); if(iso) countryMap[iso] = (countryMap[iso]||0) + 1; });
-  const topCountries = Object.entries(countryMap).sort((a,b)=>b[1]-a[1]).slice(0,5);
-  const labelMap = {};
-  yearAlbums.forEach(a => { if(a.label){ const l=a.label.trim(); labelMap[l]=(labelMap[l]||0)+1; } });
-  const topLabels = Object.entries(labelMap).sort((a,b)=>b[1]-a[1]).slice(0,3);
-
-  // Draw 3-column stats
-  const colY = 320;
-  const colH = 240;
-  const colW = (W - 120) / 3;
-  const drawCol = (x, title, items, renderItem) => {
-    ctx.fillStyle = isDark ? '#2a2a2a' : '#ffffff';
-    ctx.fillRect(x, colY, colW, colH);
-    ctx.strokeStyle = isDark ? '#3a3a3a' : '#d8d8d8';
-    ctx.lineWidth = 1;
-    ctx.strokeRect(x, colY, colW, colH);
-    ctx.fillStyle = muted;
-    ctx.font = '600 14px sans-serif';
-    ctx.textAlign = 'left';
-    ctx.fillText(title, x + 20, colY + 30);
-    items.forEach((it, i) => { renderItem(x, colY + 60 + i*32, it); });
-  };
-  drawCol(40, 'TOP GENRES', topGenres, (x,y,[g,c])=>{
-    ctx.fillStyle = fg; ctx.font = '500 15px sans-serif';
-    const txt = g.length > 22 ? g.slice(0,20)+'...' : g;
-    ctx.fillText(txt, x + 20, y);
-    ctx.fillStyle = muted; ctx.textAlign = 'right';
-    ctx.fillText(String(c), x + colW - 20, y);
-    ctx.textAlign = 'left';
-  });
-  drawCol(40 + colW + 20, 'TOP COUNTRIES', topCountries, (x,y,[iso,c])=>{
-    const info = COUNTRY_DB[iso]; const name = info?info[0]:iso;
-    ctx.fillStyle = fg; ctx.font = '500 15px sans-serif';
-    const txt = name.length > 20 ? name.slice(0,18)+'...' : name;
-    ctx.fillText(txt, x + 20, y);
-    ctx.fillStyle = muted; ctx.textAlign = 'right';
-    ctx.fillText(String(c), x + colW - 20, y);
-    ctx.textAlign = 'left';
-  });
-  drawCol(40 + (colW+20)*2, 'TOP LABELS', topLabels, (x,y,[l,c])=>{
-    ctx.fillStyle = fg; ctx.font = '500 15px sans-serif';
-    const txt = l.length > 20 ? l.slice(0,18)+'...' : l;
-    ctx.fillText(txt, x + 20, y);
-    ctx.fillStyle = muted; ctx.textAlign = 'right';
-    ctx.fillText(String(c), x + colW - 20, y);
-    ctx.textAlign = 'left';
-  });
-
-  // Keepers preview - 6x2 grid of covers
-  ctx.fillStyle = muted;
-  ctx.font = '600 14px sans-serif';
-  ctx.textAlign = 'left';
-  ctx.fillText('⭐ KEEPERS', 40, 600);
-
-  const preview = keepers.slice(0, 12);
-  const gridCols = 6;
-  const gridSize = 150;
-  const gap = 14;
-  const gridStartY = 620;
-
-  // Gather cover URLs (promise-based)
-  const coverPromises = preview.map(a => {
+  // Pre-fetch covers in parallel
+  const coverPromises = collage.map(a => {
     const k = coverKey(a.artist, a.title);
     if(coverCache[k]) return Promise.resolve({a, url: coverCache[k]});
     return fetchCover(a.artist, a.title).then(url => ({a, url}));
   });
   const withCovers = await Promise.all(coverPromises);
 
-  // Load images
   function loadImg(url){
     return new Promise(resolve => {
       if(!url){ resolve(null); return; }
@@ -1884,44 +1866,227 @@ async function generateShareImage(){
       img.onload = () => resolve(img);
       img.onerror = () => resolve(null);
       img.src = url;
-      // Timeout fallback
-      setTimeout(()=>resolve(null), 3000);
+      setTimeout(() => resolve(null), 4000);
     });
   }
   const imgs = await Promise.all(withCovers.map(c => loadImg(c.url)));
 
-  for(let i = 0; i < preview.length; i++){
-    const row = Math.floor(i / gridCols);
-    const col = i % gridCols;
-    const x = 40 + col * (gridSize + gap);
-    const y = gridStartY + row * (gridSize + gap);
-    const a = preview[i];
-    const img = imgs[i];
-    if(img){
-      try { ctx.drawImage(img, x, y, gridSize, gridSize); }
-      catch(e){ drawPlaceholder(ctx, x, y, gridSize, a); }
-    } else {
-      drawPlaceholder(ctx, x, y, gridSize, a);
-    }
-  }
+  // === Background gradient (subtle, derived from accent) ===
+  const grad = ctx.createLinearGradient(0, 0, 0, H);
+  grad.addColorStop(0, isDark ? '#1f1f1f' : '#ffffff');
+  grad.addColorStop(1, isDark ? '#141414' : '#ececec');
+  ctx.fillStyle = grad;
+  ctx.fillRect(0, 0, W, H);
 
-  // Footer
-  ctx.fillStyle = muted;
-  ctx.font = '400 14px sans-serif';
+  // Subtle accent glow at top
+  const glow = ctx.createRadialGradient(W/2, 0, 0, W/2, 0, W*0.7);
+  glow.addColorStop(0, isDark ? 'rgba(245,197,24,0.06)' : 'rgba(245,197,24,0.10)');
+  glow.addColorStop(1, 'rgba(245,197,24,0)');
+  ctx.fillStyle = glow;
+  ctx.fillRect(0, 0, W, H);
+
+  // === Header: Brand + Year ===
+  // Logo tile
+  ctx.fillStyle = accent;
+  roundRect(ctx, 60, 60, 70, 70, 14);
+  ctx.fill();
+  ctx.fillStyle = '#1a1a1a';
+  ctx.font = 'italic 700 44px Georgia, serif';
+  ctx.textBaseline = 'middle';
   ctx.textAlign = 'center';
-  ctx.fillText('Generated with Ostinato · Music, kept.', W/2, H - 30);
+  ctx.fillText('O', 95, 95);
 
-  // Download
+  // Brand text
+  ctx.textAlign = 'left';
+  ctx.textBaseline = 'top';
+  ctx.fillStyle = fg;
+  ctx.font = '700 38px -apple-system, BlinkMacSystemFont, sans-serif';
+  ctx.fillText('Ostinato', 150, 65);
+  ctx.fillStyle = muted;
+  ctx.font = '400 16px sans-serif';
+  ctx.fillText('Music, kept.', 150, 110);
+
+  // Year badge (top right)
+  ctx.fillStyle = accent;
+  roundRect(ctx, W - 220, 60, 160, 70, 14);
+  ctx.fill();
+  ctx.fillStyle = '#1a1a1a';
+  ctx.font = '700 42px sans-serif';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillText(String(year), W - 140, 95);
+
+  // === Hero stats ===
+  ctx.textAlign = 'left';
+  ctx.textBaseline = 'top';
+  ctx.fillStyle = muted;
+  ctx.font = '600 16px sans-serif';
+  ctx.fillText('YEAR IN REVIEW', 60, 180);
+
+  ctx.fillStyle = fg;
+  ctx.font = '700 92px sans-serif';
+  ctx.fillText(yearAlbums.length, 60, 215);
+  ctx.font = '500 30px sans-serif';
+  ctx.fillStyle = muted;
+  const albumWidth = ctx.measureText(yearAlbums.length).width;
+  ctx.fillText('albums', 60 + Math.ceil(getTextWidth(ctx, yearAlbums.length, '700 92px sans-serif')) + 18, 268);
+
+  // Keepers row
+  ctx.fillStyle = accent;
+  ctx.font = '700 44px sans-serif';
+  ctx.fillText('⭐ ' + keepers.length, 60, 320);
+  ctx.fillStyle = muted;
+  ctx.font = '500 22px sans-serif';
+  const kpct = yearAlbums.length ? Math.round(keepers.length / yearAlbums.length * 100) : 0;
+  ctx.fillText(`keepers · ${kpct}%`, 60 + getTextWidth(ctx, '⭐ ' + keepers.length, '700 44px sans-serif') + 16, 332);
+
+  // === Quick stats row (3 metrics) ===
+  const countryMap = {};
+  yearAlbums.forEach(a => { const iso = normalizeCountry(a.country); if(iso) countryMap[iso] = (countryMap[iso]||0)+1; });
+  const uniqueCountries = Object.keys(countryMap).length;
+  const genreMap = {};
+  yearAlbums.forEach(a => { if(a.genre) { const g = a.genre.trim(); genreMap[g] = (genreMap[g]||0)+1; } });
+  const topGenre = Object.entries(genreMap).sort((a,b) => b[1]-a[1])[0];
+  const labelMap = {};
+  yearAlbums.forEach(a => { if(a.label){ const l = a.label.trim(); labelMap[l] = (labelMap[l]||0)+1; } });
+  const topLabel = Object.entries(labelMap).sort((a,b) => b[1]-a[1])[0];
+
+  const statsY = 400;
+  const statsH = 90;
+  const statW = (W - 180) / 3;
+
+  function drawStatCard(x, label, value){
+    ctx.fillStyle = isDark ? 'rgba(255,255,255,.04)' : 'rgba(0,0,0,.04)';
+    roundRect(ctx, x, statsY, statW, statsH, 12);
+    ctx.fill();
+    ctx.fillStyle = muted;
+    ctx.font = '600 12px sans-serif';
+    ctx.textAlign = 'left';
+    ctx.fillText(label, x + 18, statsY + 18);
+    ctx.fillStyle = fg;
+    ctx.font = '700 26px sans-serif';
+    const truncated = String(value).length > 16 ? String(value).slice(0,15) + '...' : String(value);
+    ctx.fillText(truncated, x + 18, statsY + 44);
+  }
+  drawStatCard(60, 'COUNTRIES', uniqueCountries);
+  drawStatCard(60 + statW + 30, 'TOP GENRE', topGenre ? topGenre[0] : '—');
+  drawStatCard(60 + (statW + 30) * 2, 'TOP LABEL', topLabel ? topLabel[0] : '—');
+
+  // === Cover collage — the hero ===
+  const collageY = statsY + statsH + 50;
+  const collageMaxH = H - collageY - 100; // leave room for footer
+
+  // 5x5 grid for square (1080×1080), or 5×8 for story (1080×1920)
+  const cols = 5;
+  const rows = formatChoice === 'story' ? 8 : 5;
+  const totalCells = cols * rows;
+  const gap = 8;
+  const cellSize = (W - 120 - (cols-1)*gap) / cols;
+  const usedCells = Math.min(totalCells, withCovers.length);
+
+  ctx.save();
+  for(let i = 0; i < usedCells; i++){
+    const row = Math.floor(i / cols);
+    const col = i % cols;
+    const x = 60 + col * (cellSize + gap);
+    const y = collageY + row * (cellSize + gap);
+    if(y + cellSize > H - 100) break;
+    const a = withCovers[i].a;
+    const img = imgs[i];
+
+    // Round-rect clip
+    ctx.save();
+    roundRect(ctx, x, y, cellSize, cellSize, 8);
+    ctx.clip();
+    if(img){
+      try { ctx.drawImage(img, x, y, cellSize, cellSize); }
+      catch(e){ drawPlaceholder(ctx, x, y, cellSize, a); }
+    } else {
+      drawPlaceholder(ctx, x, y, cellSize, a);
+    }
+    ctx.restore();
+  }
+  ctx.restore();
+
+  // === Footer ===
+  const footerY = H - 60;
+  ctx.fillStyle = muted;
+  ctx.font = '500 16px sans-serif';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillText(`${collage.length} ${keepers.length >= 12 ? 'keepers' : 'albums'} from ${year} · ostinato`, W/2, footerY);
+
+  // === Save (use device pixel ratio for sharp mobile output) ===
+  // Note: canvas is already at 1080×, which is high-res. We just need to download as PNG.
   canvas.toBlob((blob) => {
-    if(!blob){ toast('Failed to generate image'); return; }
+    if(!blob){ toast('Failed to generate'); return; }
     const url = URL.createObjectURL(blob);
     const link = document.createElement('a');
     link.href = url;
-    link.download = `ostinato-${year}.png`;
+    link.download = `ostinato-${year}-${formatChoice}.png`;
     link.click();
-    setTimeout(()=>URL.revokeObjectURL(url), 2000);
-    toast('✓ Image saved');
+    setTimeout(() => URL.revokeObjectURL(url), 2000);
+    toast('✓ Saved');
   }, 'image/png');
+}
+
+function chooseShareFormat(){
+  return new Promise(resolve => {
+    // Lightweight inline picker — render in toast-like flow
+    const existing = document.getElementById('share-format-picker');
+    if(existing) existing.remove();
+    const div = document.createElement('div');
+    div.id = 'share-format-picker';
+    div.className = 'modal-backdrop show';
+    div.style.zIndex = '900';
+    div.innerHTML = `
+      <div class="modal" style="max-width:380px">
+        <div class="modal-header">
+          <div class="modal-title">📸 Year in Review</div>
+          <button class="btn-icon" onclick="this.closest('.modal-backdrop').remove();window._shareResolve&&window._shareResolve(null)">✕</button>
+        </div>
+        <div class="modal-body">
+          <div style="font-size:13px;color:var(--muted);margin-bottom:8px">Choose a format:</div>
+          <button class="btn" data-format="square" style="text-align:left">
+            🟦 Square (1080×1080)<br>
+            <span style="font-size:11px;color:var(--muted)">Instagram feed, Twitter, Facebook</span>
+          </button>
+          <button class="btn" data-format="story" style="text-align:left">
+            📱 Story (1080×1920)<br>
+            <span style="font-size:11px;color:var(--muted)">Instagram/WhatsApp Stories</span>
+          </button>
+        </div>
+      </div>`;
+    document.body.appendChild(div);
+    window._shareResolve = resolve;
+    div.querySelectorAll('button[data-format]').forEach(b => {
+      b.onclick = () => {
+        div.remove();
+        resolve(b.dataset.format);
+      };
+    });
+    div.addEventListener('click', e => {
+      if(e.target === div){ div.remove(); resolve(null); }
+    });
+  });
+}
+
+function roundRect(ctx, x, y, w, h, r){
+  ctx.beginPath();
+  ctx.moveTo(x + r, y);
+  ctx.arcTo(x + w, y, x + w, y + h, r);
+  ctx.arcTo(x + w, y + h, x, y + h, r);
+  ctx.arcTo(x, y + h, x, y, r);
+  ctx.arcTo(x, y, x + w, y, r);
+  ctx.closePath();
+}
+
+function getTextWidth(ctx, text, font){
+  const old = ctx.font;
+  ctx.font = font;
+  const w = ctx.measureText(String(text)).width;
+  ctx.font = old;
+  return w;
 }
 
 function drawPlaceholder(ctx, x, y, size, a){
@@ -1933,7 +2098,7 @@ function drawPlaceholder(ctx, x, y, size, a){
   ctx.fillStyle = grad;
   ctx.fillRect(x, y, size, size);
   ctx.fillStyle = 'rgba(255,255,255,0.9)';
-  ctx.font = 'italic 700 72px Georgia, serif';
+  ctx.font = `italic 700 ${Math.floor(size*0.5)}px Georgia, serif`;
   ctx.textAlign = 'center';
   ctx.textBaseline = 'middle';
   ctx.fillText(placeholderLetter(a.artist, a.title), x + size/2, y + size/2);
@@ -2192,6 +2357,18 @@ function applySyncPayload(payload){
   // Save locally too
   try { localStorage.setItem(STORAGE_KEY, JSON.stringify(state.albums)); } catch(e){}
   try { localStorage.setItem(TOLISTEN_KEY, JSON.stringify(state.toListen)); } catch(e){}
+  // Seed cover cache from any manual coverUrl values (so they persist after sync)
+  seedCoverCacheFromAlbums();
+  backfillCreatedAt();
+}
+function seedCoverCacheFromAlbums(){
+  for(const a of [...state.albums, ...state.toListen]){
+    if(a.coverUrl){
+      const k = coverKey(a.artist, a.title);
+      coverCache[k] = a.coverUrl;
+    }
+  }
+  saveCovers();
 }
 
 /* ============= Sync orchestration ============= */
@@ -2469,6 +2646,101 @@ function syncDisableConfirm(){
 }
 
 
+
+/* ============= COVER URL HELPERS ============= */
+function updateCoverPreview(){
+  const url = document.getElementById('f-cover-url').value.trim();
+  const wrap = document.getElementById('f-cover-preview');
+  const img = document.getElementById('f-cover-preview-img');
+  if(url && (url.startsWith('http://') || url.startsWith('https://'))){
+    img.src = url;
+    wrap.style.display = '';
+  } else {
+    wrap.style.display = 'none';
+  }
+}
+function clearCoverUrl(){
+  document.getElementById('f-cover-url').value = '';
+  updateCoverPreview();
+}
+
+/* ============= DISCOGS COVER SEARCH ============= */
+async function openDiscogsSearch(){
+  const artist = document.getElementById('f-artist').value.trim();
+  const title = document.getElementById('f-title').value.trim();
+  if(!artist && !title){ toast('Enter artist or title first'); return; }
+  const modal = document.getElementById('discogs-modal');
+  const body = document.getElementById('discogs-modal-body');
+  body.innerHTML = `<div class="discogs-loading">⏳ Searching Discogs...</div>`;
+  modal.classList.add('show');
+
+  // Discogs database search — no auth needed for low rate
+  // Format: https://api.discogs.com/database/search?q=ARTIST+TITLE&type=release
+  const q = encodeURIComponent(`${artist} ${title}`.trim());
+  const url = `https://api.discogs.com/database/search?q=${q}&type=release&per_page=12`;
+
+  try {
+    const r = await fetch(url, {
+      headers: {
+        'Accept': 'application/json',
+        'User-Agent': 'Ostinato/1.0',
+      }
+    });
+    if(!r.ok){
+      if(r.status === 401 || r.status === 403){
+        body.innerHTML = `<div style="color:var(--muted);text-align:center;padding:20px;font-size:13px">
+          ⚠️ Discogs requires authentication for this search.<br>
+          You can still paste a cover URL manually in the field above.
+        </div>`;
+        return;
+      }
+      throw new Error('HTTP ' + r.status);
+    }
+    const data = await r.json();
+    const results = (data.results || []).filter(x => x.cover_image && !x.cover_image.endsWith('spacer.gif'));
+    if(!results.length){
+      body.innerHTML = `<div style="color:var(--muted);text-align:center;padding:20px;font-size:13px">
+        No cover candidates found.<br>
+        Try simplifying the search (e.g., remove subtitles or special characters).
+      </div>`;
+      return;
+    }
+    body.innerHTML = `
+      <div style="font-size:13px;color:var(--muted);margin-bottom:8px">
+        Click a cover to use it. Best matches first.
+      </div>
+      <div class="discogs-grid">
+        ${results.slice(0, 12).map((r, i) => `
+          <div class="discogs-result" data-url="${escapeHtml(r.cover_image)}" data-idx="${i}">
+            <img src="${escapeHtml(r.cover_image)}" alt="" loading="lazy">
+            <div class="label">${escapeHtml(r.title || '')}${r.year?' · '+r.year:''}</div>
+          </div>
+        `).join('')}
+      </div>
+      <div style="font-size:11px;color:var(--muted);text-align:center;margin-top:10px">
+        Powered by Discogs
+      </div>`;
+    body.querySelectorAll('.discogs-result').forEach(el => {
+      el.onclick = () => {
+        const url = el.dataset.url;
+        document.getElementById('f-cover-url').value = url;
+        updateCoverPreview();
+        closeDiscogsModal();
+        toast('Cover selected');
+      };
+    });
+  } catch(e){
+    body.innerHTML = `<div style="color:var(--red);text-align:center;padding:20px;font-size:13px">
+      Discogs search failed: ${escapeHtml(e.message)}<br>
+      <span style="color:var(--muted);font-size:12px">You can paste a URL manually instead.</span>
+    </div>`;
+  }
+}
+function closeDiscogsModal(){
+  document.getElementById('discogs-modal').classList.remove('show');
+}
+
+
 function populateDatalists(){
   // Combine static suggestions with any new values from user's current data
   const dynamicCountries = new Set([...COUNTRY_SUGGESTIONS]);
@@ -2556,6 +2828,12 @@ document.addEventListener('DOMContentLoaded', () => {
   // Wire iTunes auto-fill on Artist/Title change
   document.getElementById('f-artist').addEventListener('input', debouncedAutoFill);
   document.getElementById('f-title').addEventListener('input', debouncedAutoFill);
+  // Live preview for cover URL field
+  document.getElementById('f-cover-url').addEventListener('input', updateCoverPreview);
+  // Discogs modal backdrop
+  document.getElementById('discogs-modal').addEventListener('click', e => {
+    if(e.target.id === 'discogs-modal') closeDiscogsModal();
+  });
   // Reset the autofill cache when opening the modal fresh
   document.getElementById('f-artist').addEventListener('focus', () => { autofillLastKey = null; });
 
@@ -2574,7 +2852,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
   document.addEventListener('keydown', e => {
     if(e.key === 'Escape'){
-      closeModal(); closeMenu(); closeDetailModal(); closeMove(); closeSyncModal();
+      closeModal(); closeMenu(); closeDetailModal(); closeMove(); closeSyncModal(); closeDiscogsModal();
       if(discoverState.active) closeDiscover();
     }
     if(discoverState.active){
